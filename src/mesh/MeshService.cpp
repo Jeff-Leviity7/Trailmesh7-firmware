@@ -536,9 +536,18 @@ void MeshService::sendRoutingErrorResponse(meshtastic_Routing_Error error, const
         return;
     }
 
-    // Use the routing module to send the error response
+    // Use the routing module to send the error response.
+    //
+    // getFrom(), not mp->from. A packet from the phone carries from=0, so the raw
+    // field addressed this reply to node 0: Router::sendLocal logged "Packet
+    // received with to: of 0!", transmitted it over LoRa to nobody, and the phone
+    // never learned its text was rate-limited. getFrom() maps 0 to our own node
+    // number, so sendLocal delivers the reply locally and it reaches the phone,
+    // the same as Router::abortSendAndNak. Measured on a TrailMesh7 tag
+    // 2026-10-18: two invites sent in one loop, the second dropped with no
+    // verdict on the phone, every time.
     if (routingModule) {
-        routingModule->sendAckNak(error, mp->from, mp->id, mp->channel);
+        routingModule->sendAckNak(error, getFrom(mp), mp->id, mp->channel);
     } else {
         LOG_ERROR("Cannot send routing error response: no routing module");
     }
