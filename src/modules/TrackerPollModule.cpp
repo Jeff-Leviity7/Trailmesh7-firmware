@@ -26,8 +26,8 @@ ProcessMessage TrackerPollModule::handleReceived(const meshtastic_MeshPacket &mp
 {
     trailmesh::TrackerPollOp op;
     if (!trailmesh::trackerPollOp(mp.decoded.payload.bytes, mp.decoded.payload.size, op)) {
-        LOG_DEBUG("TRAILMESH: tracker-poll frame from 0x%08x with no valid header; dropped", getFrom(&mp));
-        return ProcessMessage::STOP;
+        LOG_DEBUG("TRAILMESH: tracker-poll frame from 0x%08x with no valid header; ignored", getFrom(&mp));
+        return ProcessMessage::CONTINUE;
     }
 
     switch (op) {
@@ -41,11 +41,16 @@ ProcessMessage TrackerPollModule::handleReceived(const meshtastic_MeshPacket &mp
         break;
     case trailmesh::TrackerPollOp::Current:
     case trailmesh::TrackerPollOp::Answer:
-        // Ours to send, not to receive. An Answer addressed to a member is
-        // delivered to that member's phone by the normal path regardless.
+        // Ours to send, not to act on: the phone reads these.
         break;
     }
-    return ProcessMessage::STOP;
+    // CONTINUE, never STOP. Modules see a packet in the order they were
+    // created, and STOP ends the chain - RoutingModule, created after this
+    // one, is what delivers a received packet to the phone. Returning STOP
+    // here swallowed every Answer on the member's own tag, so polls were
+    // acknowledged and never answered as far as the app could tell.
+    // Measured 2026-10-28, Blue polling Pink and Green.
+    return ProcessMessage::CONTINUE;
 }
 
 void TrackerPollModule::handleSetup(trailmesh::TrackerPollOp op, const meshtastic_MeshPacket &mp)
