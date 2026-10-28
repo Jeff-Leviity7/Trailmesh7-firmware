@@ -138,7 +138,7 @@ int SystemCommandsModule::handleInputEvent(const InputEvent *event)
         service->sendToPhone(p);
         return true;
     }
-        // GPS
+        // GPS, on its own or together with the buzzer
         // GPS, on its own or together with the buzzer
     case INPUT_BROKER_GPS_TOGGLE:
     case INPUT_BROKER_PRIVACY_TOGGLE:

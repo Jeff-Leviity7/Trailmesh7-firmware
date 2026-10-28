@@ -4843,11 +4843,10 @@ bool NodeDB::generateCryptoKeyPair(const uint8_t *privateKey)
     }
     // Try to regenerate public key from existing private key if it's valid and not low entropy
     else if (config.security.private_key.size == 32 && !keyIsLowEntropy) {
-        config.security.public_key.size = 32;
-        LOG_DEBUG("Regenerate PKI public key from existing private key");
-        if (crypto->regeneratePublicKey(config.security.public_key.bytes, config.security.private_key.bytes)) {
-            keygenSuccess = true;
-        }
+        LOG_DEBUG("Regenerate PKI public key from private key");
+        if (!derivePublicKeyFromPrivate())
+            return false;
+        keygenSuccess = true;
     } else {
         // Generate a new key pair
         LOG_INFO("Generate new PKI keys");
