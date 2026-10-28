@@ -33,7 +33,8 @@
 
 /// Packet inspection and traffic shaping: position dedup, per-node rate limiting, unknown-packet
 /// filtering, NodeInfo direct response, and the next-hop/role overflow caches. One flat 10-byte
-/// unified cache backs all per-node features; see docs/node_info_stores.md for the store overview.
+/// unified cache backs all per-node features; see https://meshtastic.org/docs/development/reference/node-info-stores for the
+/// store overview.
 class TrafficManagementModule : public MeshModule, private concurrency::OSThread
 {
   public:
@@ -94,7 +95,7 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     void purgeAll();
 
     /// True when perhapsRebroadcast() must force hop_limit=0 for this packet, regardless of
-    /// router_preserve_hops or favorite-node logic (set by alterReceived()).
+    /// router_preserve_hops or favorite-node logic.
     bool shouldExhaustHops(const meshtastic_MeshPacket &mp) const
     {
         return exhaustRequested && exhaustRequestedFrom == getFrom(&mp) && exhaustRequestedId == mp.id;
@@ -115,8 +116,6 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
     /// Promiscuous: this module inspects every packet.
     bool wantPacket(const meshtastic_MeshPacket *p) override { return true; }
-    /// Mutate relayed packets in place (position precision clamp).
-    void alterReceived(meshtastic_MeshPacket &mp) override;
     /// 60 s maintenance sweep: expire timed state, saturate tick stamps, reconcile with NodeDB.
     int32_t runOnce() override;
     /// Clear all per-node traffic state (protected for test shims).
@@ -144,7 +143,8 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
   private:
     // 10-byte packed entry, all platforms. Tick stamps are free-running modular counters with
     // non-zero presence sentinels; the 4-bit cached role rides the top bits of the two count
-    // bytes (tier-3 role fallback). Full layout and rationale: docs/node_info_stores.md.
+    // bytes (tier-3 role fallback). Full layout and rationale:
+    // https://meshtastic.org/docs/development/reference/node-info-stores.
 #if _meshtastic_Config_DeviceConfig_Role_MAX > 15
 #warning "Device role enum max exceeds 15 - TMM 4-bit role cache (rate_count[7:6]/unknown_count[7:6]) will truncate new values"
 #endif
@@ -297,8 +297,8 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
 
     meshtastic_TrafficManagementStats stats;
 
-    // Set during alterReceived() when the packet's hops should be exhausted; checked by
-    // perhapsRebroadcast() for the matching packet key. Reset at start of handleReceived().
+    // Set when the packet's hops should be exhausted; checked by perhapsRebroadcast() for the
+    // matching packet key. Reset at start of handleReceived().
     bool exhaustRequested = false;
     NodeNum exhaustRequestedFrom = 0;
     PacketId exhaustRequestedId = 0;
@@ -347,12 +347,14 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
 
     /// 60 s NodeInfo-cache maintenance under cacheLock: saturate the expired obsTick stamp (wrap-safety
     /// for the modular clock) and run the boot/hourly reconcile. Guarded by TMM_HAS_NODEINFO_CACHE alone
-    /// (never the unified cache size); see docs/node_info_stores.md "Tick clocks and wrap safety".
+    /// (never the unified cache size); see https://meshtastic.org/docs/development/reference/node-info-stores "Tick clocks and
+    /// wrap safety".
     void maintainNodeInfoCacheLocked();
 
     /// Anti-entropy under cacheLock: upsert hot-store + warm-tier records this cache lacks (never sets
     /// hasObserved - seeding is knowledge, not observation), and refresh isMember from both NodeDB
-    /// tiers. Cost/lag: docs/node_info_stores.md "Consistency with NodeDB (anti-entropy)".
+    /// tiers. Cost/lag: https://meshtastic.org/docs/development/reference/node-info-stores "Consistency with NodeDB
+    /// (anti-entropy)".
     void reconcileNodeInfoFromNodeDBLocked();
     /// Learn an observed NODEINFO frame into the cache (key hygiene + provenance rules apply).
     void cacheNodeInfoPacket(const meshtastic_MeshPacket &mp);
@@ -368,7 +370,8 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
 
     // Direct-response throttles bounding the reflector risk of spoofed replies: three fixed bounds
     // (per requester, per target, 1 s global airtime floor) via 8-slot LRU RAM tables, wrap-safe and
-    // PSRAM-agnostic. Design & rationale: docs/traffic_management_module.md "Throttling direct responses".
+    // PSRAM-agnostic. Design & rationale: https://meshtastic.org/docs/development/reference/traffic-management-internals
+    // "Throttling direct responses".
     static constexpr uint32_t kDirectResponsePerRequesterMs = 60'000UL;
     static constexpr uint32_t kDirectResponsePerTargetMs = 60'000UL;
     static constexpr uint32_t kDirectResponseGlobalMs = 1'000UL;

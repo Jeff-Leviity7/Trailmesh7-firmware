@@ -1,6 +1,7 @@
 #ifdef SENSECAP_INDICATOR
 
 #include "IndicatorSerial.h"
+#include "UptimeClock.h"
 #include "concurrency/LockGuard.h"
 #include "mesh/comms/UARTProxy.h"
 #include <HardwareSerial.h>
@@ -61,7 +62,7 @@ void SensecapIndicator::probe_link()
     msg.data.ping = meshtastic_InterdeviceVersion_INTERDEVICE_VERSION_CURRENT;
     stamp_request(msg);
     send_uplink_unlocked(msg);
-    last_probe = millis();
+    last_probe = Time::skipZero(Time::getMillis());
 }
 
 // Read whatever is available on the link and process complete packets
@@ -486,7 +487,7 @@ bool SensecapIndicator::handle_packet(size_t payload_len)
             LOG_WARN("Request 0x%08x nacked by the co-processor", expected_id);
             request_nacked = true;
         } else if (message.id == 0) {
-            LOG_WARN("Co-processor could not decode a frame");
+            LOG_WARN("Co-processor can't decode a frame");
         }
         return true;
     case meshtastic_InterdeviceMessage_sd_info_tag:

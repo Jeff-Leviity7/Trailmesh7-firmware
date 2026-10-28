@@ -8,23 +8,26 @@
 #include "platform/portduino/PortduinoGlue.h"
 #endif
 #include "Throttle.h"
+#include "UptimeClock.h"
 
 #define RECENT_WARN_AGE (10 * 60 * 1000L) // Warn if the packet that gets removed was more recent than 10 min
 
 #define VERBOSE_PACKET_HISTORY 0     // Set to 1 for verbose logging, 2 for heavy debugging
-#define PACKET_HISTORY_TRACE_AGING 1 // Set to 1 to enable logging of the age of re/used history slots
+#define PACKET_HISTORY_TRACE_AGING 0 // Set to 1 to enable logging of the age of re/used history slots
 
 PacketHistory::PacketHistory(uint32_t size) : recentPacketsCapacity(0) // Initialize members
 {
     if (size < 4 || size > PACKETHISTORY_MAX) { // Copilot suggested - makes sense
-        LOG_WARN("Packet History - Invalid size %d, using default %d", size, PACKETHISTORY_MAX);
+        LOG_WARN("Packet History - Invalid size %u, using default %u", static_cast<unsigned>(size),
+                 static_cast<unsigned>(PACKETHISTORY_MAX));
         size = PACKETHISTORY_MAX; // Use default size if invalid
     }
 
 #if !MESHTASTIC_EXCLUDE_PKT_HISTORY_HASH
     // Ensure capacity fits in uint16_t hash index (HASH_EMPTY = 0xFFFF is the sentinel)
     if (size >= HASH_EMPTY) {
-        LOG_WARN("Packet History - Clamping size %d to %d (hash index limit)", size, HASH_EMPTY - 1);
+        LOG_WARN("Packet History - Clamping size %u to %u (hash index limit)", static_cast<unsigned>(size),
+                 static_cast<unsigned>(HASH_EMPTY - 1));
         size = HASH_EMPTY - 1;
     }
 #endif
@@ -33,7 +36,7 @@ PacketHistory::PacketHistory(uint32_t size) : recentPacketsCapacity(0) // Initia
     recentPacketsCapacity = size;
     recentPackets.reset(new PacketRecord[recentPacketsCapacity]);
     if (!recentPackets) { // No logging here, console/log probably uninitialized yet.
-        LOG_ERROR("Packet History - Memory allocation failed for size=%d entries / %d Bytes", size,
+        LOG_ERROR("Packet History - Memory allocation failed for size=%u entries / %zu Bytes", static_cast<unsigned>(size),
                   sizeof(PacketRecord) * recentPacketsCapacity);
         recentPacketsCapacity = 0; // mark allocation fail
         return;                    // return early
@@ -49,7 +52,7 @@ PacketHistory::PacketHistory(uint32_t size) : recentPacketsCapacity(0) // Initia
     hashMask = hashCapacity - 1;
     hashIndex.reset(new uint16_t[hashCapacity]);
     if (!hashIndex) {
-        LOG_ERROR("Packet History - Hash index allocation failed for %d entries", hashCapacity);
+        LOG_ERROR("Packet History - Hash index allocation failed for %u entries", static_cast<unsigned>(hashCapacity));
         hashCapacity = 0;
         hashMask = 0;
         return;
@@ -64,13 +67,13 @@ bool PacketHistory::wasSeenRecently(const meshtastic_MeshPacket *p, bool withUpd
                                     bool *wasUpgraded)
 {
     if (!initOk()) {
-        LOG_ERROR("Packet History - Was Seen Recently: NOT INITIALIZED!");
+        LOG_ERROR("Packet History - Was Seen Recently: NOT INITIALIZED");
         return false;
     }
 
     if (p->id == 0) {
 #if VERBOSE_PACKET_HISTORY
-        LOG_DEBUG("Packet History - Was Seen Recently: ID is 0, not a floodable message");
+        LOG_DEBUG("Packet History - Was Seen Recently: ID 0, not floodable");
 #endif
         return false; // Not a floodable message ID, so we don't care
     }
@@ -91,9 +94,9 @@ bool PacketHistory::wasSeenRecently(const meshtastic_MeshPacket *p, bool withUpd
         r.relayed_by[0] = p->relay_node;
     }
 
-    r.rxTimeMsec = millis(); //
-    if (r.rxTimeMsec == 0)   // =0 every 49.7 days? 0 is special
-        r.rxTimeMsec = 1;
+    // TODO(elapsed-stamp): 0 means "empty slot" here and insert() drops a record stamped 0, so the
+    // dodge is important; a same-instant `now - rxTimeMsec` read still underflows to a huge age.
+    r.rxTimeMsec = Time::skipZero(Time::getMillis());
 
 #if VERBOSE_PACKET_HISTORY
     LOG_DEBUG(
@@ -107,8 +110,8 @@ bool PacketHistory::wasSeenRecently(const meshtastic_MeshPacket *p, bool withUpd
 
     // Check for hop_limit upgrade scenario
     if (seenRecently && wasUpgraded && getHighestHopLimit(*found) < p->hop_limit) {
-        LOG_DEBUG("Packet History - Hop limit upgrade: packet 0x%08x from hop_limit=%d to hop_limit=%d", p->id,
-                  getHighestHopLimit(*found), p->hop_limit);
+        LOG_TRACE("Packet History - Hop limit upgrade: packet 0x%08x hop_limit=%d -> %d", p->id, getHighestHopLimit(*found),
+                  p->hop_limit);
         *wasUpgraded = true;
     } else if (wasUpgraded) {
         *wasUpgraded = false; // Initialize to false if not an upgrade
@@ -234,7 +237,7 @@ void PacketHistory::hashInsert(NodeNum sender, PacketId id, uint16_t slotIdx)
         }
         bucket = (bucket + 1) & hashMask;
     }
-    LOG_ERROR("Packet History - hashInsert: table full or corrupted, rebuilding");
+    LOG_ERROR("Packet History - hashInsert: table full or corrupt, rebuild");
     hashRebuild();
 }
 
@@ -357,8 +360,7 @@ void PacketHistory::insert(const PacketRecord &r)
             it = (base + recentPacketsCapacity);
         } else {
             if (it->rxTimeMsec == 0) {
-                LOG_WARN("Packet History - insert: Found packet s=0x%08x id=0x%08x with rxTimeMsec = 0, slot %d/%d. Should never "
-                         "happen!",
+                LOG_WARN("Packet History - insert: Found s=0x%08x id=0x%08x rxTimeMsec = 0, slot %d/%d. Should never happen",
                          it->sender, it->id, it - base, recentPacketsCapacity);
             }
             if ((now_millis - it->rxTimeMsec) > OldtrxTimeMsec) { // 49.7 days rollover friendly
@@ -373,7 +375,7 @@ void PacketHistory::insert(const PacketRecord &r)
     }
 
     if (tu == NULL) {
-        LOG_ERROR("Packet History - insert: No free slot, no matched packet, no oldest to reuse. Something leaked."); // mx
+        LOG_ERROR("Packet History - insert: No free/matched/oldest slot. Something leaked"); // mx
         // assert(false); // This should never happen, we should always have at least one packet to clear
         return; // Return early if we can't update the history
     }
@@ -399,7 +401,7 @@ void PacketHistory::insert(const PacketRecord &r)
         } else {
             // debug only
 #if VERBOSE_PACKET_HISTORY
-            LOG_WARN("Packet History - insert: Reusing slot aged %.3fs < %ds with MATCHED PACKET - this is normal",
+            LOG_WARN("Packet History - insert: Reusing slot aged %.3fs < %ds with MATCHED PACKET - normal",
                      OldtrxTimeMsec / 1000., RECENT_WARN_AGE / 1000);
 #endif
         }
@@ -424,7 +426,7 @@ void PacketHistory::insert(const PacketRecord &r)
 
     if (r.rxTimeMsec == 0) {
 #if VERBOSE_PACKET_HISTORY
-        LOG_WARN("Packet History - insert: I will not store packet with rxTimeMsec = 0.");
+        LOG_WARN("Packet History - insert: Won't store packet with rxTimeMsec = 0");
 #endif
         return; // Return early if we can't update the history
     }
@@ -457,7 +459,7 @@ void PacketHistory::insert(const PacketRecord &r)
 bool PacketHistory::wasRelayer(const uint8_t relayer, const uint32_t id, const NodeNum sender, bool *wasSole)
 {
     if (!initOk()) {
-        LOG_ERROR("PacketHistory - wasRelayer: NOT INITIALIZED!");
+        LOG_ERROR("PacketHistory - wasRelayer: NOT INITIALIZED");
         return false;
     }
 
@@ -527,7 +529,7 @@ void PacketHistory::checkRelayers(uint8_t relayer1, uint8_t relayer2, uint32_t i
         *r2WasSole = false;
 
     if (!initOk()) {
-        LOG_ERROR("PacketHistory - checkRelayers: NOT INITIALIZED!");
+        LOG_ERROR("PacketHistory - checkRelayers: NOT INITIALIZED");
         return;
     }
 
@@ -545,7 +547,7 @@ void PacketHistory::checkRelayers(uint8_t relayer1, uint8_t relayer2, uint32_t i
 void PacketHistory::removeRelayer(const uint8_t relayer, const uint32_t id, const NodeNum sender)
 {
     if (!initOk()) {
-        LOG_ERROR("Packet History - remove Relayer: NOT INITIALIZED!");
+        LOG_ERROR("Packet History - remove Relayer: NOT INITIALIZED");
         return;
     }
 

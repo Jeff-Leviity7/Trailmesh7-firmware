@@ -1,4 +1,5 @@
 #include "MeshModule.h"
+#include "AckProof.h"
 #include "Channels.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -52,7 +53,7 @@ int32_t MeshModule::setStartDelay()
 }
 
 meshtastic_MeshPacket *MeshModule::allocAckNak(meshtastic_Routing_Error err, NodeNum to, PacketId idFrom, ChannelIndex chIndex,
-                                               uint8_t hopLimit)
+                                               uint8_t hopLimit, const meshtastic_MeshPacket *relaySource)
 {
     meshtastic_Routing c = meshtastic_Routing_init_default;
 
@@ -75,6 +76,23 @@ meshtastic_MeshPacket *MeshModule::allocAckNak(meshtastic_Routing_Error err, Nod
     p->to = to;
     p->decoded.request_id = idFrom;
     p->channel = chIndex;
+    // When this ack reports an overheard rebroadcast of our own packet, carry that copy's relaying node
+    // and the link metrics (RSSI/SNR) we heard it at, so the phone can attribute them to the relayer. The
+    // ack is delivered locally (to == us), so Router::send() is bypassed and won't overwrite these.
+    if (relaySource) {
+        p->relay_node = relaySource->relay_node;
+        // rx_rssi has explicit presence: has_rx_rssi has to travel with it or the reading never encodes
+        p->has_rx_rssi = relaySource->has_rx_rssi;
+        p->rx_rssi = relaySource->rx_rssi;
+        p->rx_snr = relaySource->rx_snr;
+    }
+#if !(MESHTASTIC_EXCLUDE_PKI)
+    // Prove to the original sender that this ack came from the node holding their pairwise key.
+    // No-op unless we hold an authoritative key for `to`. Must follow the request_id and payload
+    // assignments above: the proof covers request_id and is appended to the payload.
+    ackProofAttach(p);
+#endif
+
     if (err != meshtastic_Routing_Error_NONE)
         LOG_WARN("Alloc an err=%d,to=0x%08x,idFrom=0x%08x,id=0x%08x", err, to, idFrom, p->id);
 
@@ -128,8 +146,6 @@ void MeshModule::callModules(meshtastic_MeshPacket &mp, RxSource src)
         assert(!pi.myReply); // If it is !null it means we have a bug, because it should have been sent the previous time
 
         if (wantsPacket) {
-            LOG_DEBUG("Module '%s' wantsPacket=%d", pi.name, wantsPacket);
-
             moduleFound = true;
 
             /// received channel (or NULL if not decoded)
@@ -170,11 +186,9 @@ void MeshModule::callModules(meshtastic_MeshPacket &mp, RxSource src)
                         pi.sendResponse(mp);
                         LOG_INFO("Asked module '%s' to send a response", pi.name);
                     } else {
-                        LOG_DEBUG("Module '%s' cannot respond on portnum=%d", pi.name, mp.decoded.portnum);
+                        LOG_DEBUG("Module '%s' can't respond on portnum=%d", pi.name, mp.decoded.portnum);
                     }
                     ignoreRequest = ignoreRequest || pi.ignoreRequest; // If at least one module asks it, we may ignore a request
-                } else {
-                    LOG_DEBUG("Module '%s' considered", pi.name);
                 }
 
                 // If the requester didn't ask for a response we might need to discard unused replies to prevent memory leaks

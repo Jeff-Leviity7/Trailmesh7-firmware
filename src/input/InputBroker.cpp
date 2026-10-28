@@ -9,6 +9,7 @@
 #endif
 
 #if ARCH_PORTDUINO
+#include "input/ArcadeBonnet.h"
 #include "input/LinuxInputImpl.h"
 #include "input/LinuxJoystick.h"
 #include "input/SeesawRotary.h"
@@ -17,9 +18,11 @@
 
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER
 #include "input/ExpressLRSFiveWay.h"
+#include "input/QuadratureEncoder.h"
 #include "input/RotaryEncoderImpl.h"
 #include "input/RotaryEncoderInterruptImpl1.h"
 #include "input/SerialKeyboardImpl.h"
+#include "input/TCA6408Rotary.h"
 #include "input/UpDownInterruptImpl1.h"
 #include "input/i2cButton.h"
 #if HAS_TRACKBALL
@@ -40,13 +43,13 @@
 
 #if defined(BUTTON_PIN_TOUCH)
 ButtonThread *TouchButtonThread = nullptr;
-#if HAS_PWM_BACKLIGHT || defined(PIN_EINK_EN)
+#if HAS_BACKLIGHT
 static bool touchBacklightWasOn = false;
 static bool touchBacklightActive = false;
 #endif
 #endif
 
-#if defined(BUTTON_PIN) || defined(ARCH_PORTDUINO)
+#if defined(BUTTON_PIN) || defined(ARCH_PORTDUINO) || defined(MUZI_BASE)
 ButtonThread *UserButtonThread = nullptr;
 #endif
 
@@ -246,41 +249,39 @@ void InputBroker::Init()
     };
     touchConfig.singlePress = INPUT_BROKER_NONE;
     touchConfig.longPress = INPUT_BROKER_BACK;
-#if HAS_PWM_BACKLIGHT || defined(PIN_EINK_EN)
+#if HAS_BACKLIGHT
     // Touch pad drives the backlight on devices that have one
     touchConfig.longPress = INPUT_BROKER_NONE;
+#endif
+#if HAS_BACKLIGHT || defined(HAPTIC_FEEDBACK_PIN)
     touchConfig.suppressLeadUpSound = true;
+#if defined(HAPTIC_FEEDBACK_PIN)
+    initHapticFeedback();
+#endif
+    // One handler per event, a second assignment would silently drop the first
     touchConfig.onPress = []() {
-        touchBacklightWasOn = uiconfig.screen_brightness > 0;
-        if (!touchBacklightWasOn) {
-#if HAS_PWM_BACKLIGHT
-            graphics::backlightOn();
-#else
-            digitalWrite(PIN_EINK_EN, HIGH);
-#endif
-        }
+#if HAS_BACKLIGHT
+        touchBacklightWasOn = graphics::backlightIsLit();
+        if (!touchBacklightWasOn)
+            graphics::backlightMomentaryOn();
         touchBacklightActive = true;
-    };
-    touchConfig.onRelease = []() {
-        if (touchBacklightActive && !touchBacklightWasOn) {
-#if HAS_PWM_BACKLIGHT
-            graphics::backlightOff();
-#else
-            digitalWrite(PIN_EINK_EN, LOW);
-#endif
-        }
-        touchBacklightActive = false;
-    };
 #endif
 #if defined(HAPTIC_FEEDBACK_PIN)
-    // Blip on touch, second blip when long-press fires (500 ms = touchConfig.longPressTime default).
-    touchConfig.suppressLeadUpSound = true;
-    initHapticFeedback();
-    touchConfig.onPress = []() {
+        // Blip on touch, second blip when long-press fires (500 ms = touchConfig.longPressTime default).
         hapticFeedback->pulse(80);
         hapticFeedback->armDelayedPulse(500, 80);
+#endif
     };
-    touchConfig.onRelease = []() { hapticFeedback->cancelDelayedPulse(); };
+    touchConfig.onRelease = []() {
+#if HAS_BACKLIGHT
+        if (touchBacklightActive && !touchBacklightWasOn)
+            graphics::backlightOff();
+        touchBacklightActive = false;
+#endif
+#if defined(HAPTIC_FEEDBACK_PIN)
+        hapticFeedback->cancelDelayedPulse();
+#endif
+    };
 #endif
     TouchButtonThread->initButton(touchConfig);
 #endif
@@ -362,30 +363,6 @@ void InputBroker::Init()
 #define BUTTON_ACTIVE_PULLUP true
 #endif
 
-#if defined(ELECROW_ThinkNode_M8)
-    // Rotary encoder drives the UI, so the function button keeps a fixed map.
-    LOG_DEBUG("ThinkNode_M8 button");
-    UserButtonThread = new ButtonThread("FunctionButton");
-    {
-        ButtonConfig userConfig;
-        userConfig.pinNumber = (uint8_t)_pinNum;
-        userConfig.activeLow = BUTTON_ACTIVE_LOW;
-        userConfig.activePullup = BUTTON_ACTIVE_PULLUP;
-        userConfig.pullupSense = pullup_sense;
-        userConfig.intRoutine = []() {
-            UserButtonThread->userButton.tick();
-            UserButtonThread->setIntervalFromNow(0);
-            runASAP = true;
-            BaseType_t higherWake = 0;
-            concurrency::mainDelay.interruptFromISR(&higherWake);
-        };
-        userConfig.singlePress = INPUT_BROKER_SEND_PING;
-        userConfig.longPress = INPUT_BROKER_SHUTDOWN;
-        userConfig.longPressTime = 5000;
-        userConfig.doublePress = INPUT_BROKER_GPS_TOGGLE;
-        UserButtonThread->initButton(userConfig);
-    }
-#else
     // Buttons. Moved here cause we need NodeDB to be initialized
     // If your variant.h has a BUTTON_PIN defined, go ahead and define BUTTON_ACTIVE_LOW and BUTTON_ACTIVE_PULLUP
     UserButtonThread = new ButtonThread("UserButton");
@@ -443,7 +420,6 @@ void InputBroker::Init()
         userConfigNoScreen.triplePress = INPUT_BROKER_GPS_TOGGLE;
         UserButtonThread->initButton(userConfigNoScreen);
     }
-#endif // ELECROW_ThinkNode_M8
 #endif // BUTTON_PIN
 #endif // HAS_BUTTON
 
@@ -462,6 +438,13 @@ void InputBroker::Init()
             delete upDownInterruptImpl1;
             upDownInterruptImpl1 = nullptr;
         }
+#elif defined(INPUTDRIVER_ENCODER_TYPE) && (INPUTDRIVER_ENCODER_TYPE == 4)
+        // Pins come from variant.h, so there is no moduleConfig to consult and nothing to enable.
+        quadratureEncoder = new QuadratureEncoder("quadEnc");
+        if (!quadratureEncoder->init()) {
+            delete quadratureEncoder;
+            quadratureEncoder = nullptr;
+        }
 #else
         rotaryEncoderInterruptImpl1 = new RotaryEncoderInterruptImpl1();
         if (!rotaryEncoderInterruptImpl1->init()) {
@@ -473,6 +456,13 @@ void InputBroker::Init()
         cardKbI2cImpl->init();
 #if defined(M5STACK_UNITC6L)
         i2cButton = new i2cButtonThread("i2cButtonThread");
+#endif
+#if defined(HAS_TCA6408_ROTARY)
+        tca6408Rotary = new TCA6408Rotary("TCA6408Rotary");
+        if (!tca6408Rotary->init()) {
+            delete tca6408Rotary;
+            tca6408Rotary = nullptr;
+        }
 #endif
 #ifdef INPUTBROKER_MATRIX_TYPE
         kbMatrixImpl = new KbMatrixImpl();
@@ -492,6 +482,13 @@ void InputBroker::Init()
                 delete seesawRotary;
                 seesawRotary = nullptr;
             }
+            if (portduino_config.arcadeBonnetAddress != 0) {
+                arcadeBonnet = new ArcadeBonnet("ArcadeBonnet");
+                if (!arcadeBonnet->init()) {
+                    delete arcadeBonnet;
+                    arcadeBonnet = nullptr;
+                }
+            }
         }
 #ifdef __linux__
         // Linux evdev keyboard input only - macOS has no <linux/input.h>.
@@ -504,9 +501,33 @@ void InputBroker::Init()
     }
 #endif
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER && HAS_TRACKBALL
-    if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
+    if (screen && config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
         trackballInterruptImpl1 = new TrackballInterruptImpl1();
         trackballInterruptImpl1->init(TB_DOWN, TB_UP, TB_LEFT, TB_RIGHT, TB_PRESS);
+    }
+#endif
+#if MUZI_BASE
+    if (!screen) {
+        UserButtonThread = new ButtonThread("UserButton");
+        ButtonConfig userConfigNoScreen;
+        userConfigNoScreen.pinNumber = (uint8_t)TB_PRESS;
+        userConfigNoScreen.activeLow = true;
+        userConfigNoScreen.activePullup = true;
+        userConfigNoScreen.pullupSense = pullup_sense;
+        userConfigNoScreen.intRoutine = []() {
+            UserButtonThread->userButton.tick();
+            UserButtonThread->setIntervalFromNow(0);
+            runASAP = true;
+            BaseType_t higherWake = 0;
+            concurrency::mainDelay.interruptFromISR(&higherWake);
+        };
+        userConfigNoScreen.singlePress = INPUT_BROKER_USER_PRESS;
+        userConfigNoScreen.longPress = INPUT_BROKER_NONE;
+        userConfigNoScreen.longPressTime = 500;
+        userConfigNoScreen.longLongPress = INPUT_BROKER_SHUTDOWN;
+        userConfigNoScreen.doublePress = INPUT_BROKER_SEND_PING;
+        userConfigNoScreen.triplePress = INPUT_BROKER_GPS_TOGGLE;
+        UserButtonThread->initButton(userConfigNoScreen);
     }
 #endif
 #ifdef INPUTBROKER_EXPRESSLRSFIVEWAY_TYPE

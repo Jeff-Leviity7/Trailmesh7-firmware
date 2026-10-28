@@ -11,8 +11,22 @@
 #include "concurrency/OSThread.h"
 #include <memory>
 
+inline bool isCoordinatePortnum(meshtastic_PortNum portnum)
+{
+    return portnum == meshtastic_PortNum_POSITION_APP || portnum == meshtastic_PortNum_WAYPOINT_APP ||
+           portnum == meshtastic_PortNum_MAP_REPORT_APP;
+}
+
+bool isBlockedEventCoordinatePacket(const meshtastic_MeshPacket *p);
+/// Retarget a locally-originated coordinate packet that would be blocked on the event channel onto the
+/// position channel (see findPositionChannel). Returns true if p->channel was changed; false when the
+/// packet is not a blocked event coordinate packet or no channel carries positions.
+bool coerceCoordinatePacketToPositionChannel(meshtastic_MeshPacket *p);
+bool willUsePki(const meshtastic_MeshPacket *p);
+
 /// rx_time/has_rx_time for "now": a real epoch when the clock is trustworthy, else a
-/// Time::getMillis() placeholder with valid=false.
+/// Time::getUptimeSecs() placeholder with valid=false. Uptime seconds are monotonic, so
+/// reconciliation against a later epoch is exact at any age.
 struct RxTimeStamp {
     uint32_t time;
     bool valid;
@@ -84,6 +98,16 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     [[nodiscard]] meshtastic_QueueStatus getQueueStatus();
 
     /**
+     * The ack proof verdict sniffReceived() reached for this packet, or ACK_PROOF_ABSENT when it
+     * reached none. Only valid until the next packet is sniffed.
+     */
+    virtual meshtastic_MeshPacket_AckProofStatus ackProofStatusFor(const meshtastic_MeshPacket &p) const
+    {
+        (void)p;
+        return meshtastic_MeshPacket_AckProofStatus_ACK_PROOF_ABSENT;
+    }
+
+    /**
      * @return our local nodenum */
     [[nodiscard]] NodeNum getNodeNum();
 
@@ -128,6 +152,14 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     virtual bool relayOpaquePacket(const meshtastic_MeshPacket *) { return false; }
 
     /**
+     * Generate the implicit ACK for our own transmission overheard being rebroadcast, using header
+     * fields only (from/id). Split out of shouldFilterReceived() so it can also run when the auth
+     * gate short-circuits a packet we cannot decrypt (a PKI DM we originated is opaque to us, so
+     * without this the client never sees "Delivered to mesh" for DMs).
+     */
+    virtual void perhapsGenerateImplicitAckForOwnOverheard(const meshtastic_MeshPacket *) {}
+
+    /**
      * Determine if hop_limit should be decremented for a relay operation.
      * Returns false (preserve hop_limit) only if all conditions are met:
      * - It's NOT the first hop (first hop must always decrement)
@@ -149,7 +181,7 @@ class Router : protected concurrency::OSThread, protected PacketHistory
      * Send an ack or a nak packet back towards whoever sent idFrom
      */
     void sendAckNak(meshtastic_Routing_Error err, NodeNum to, PacketId idFrom, ChannelIndex chIndex, uint8_t hopLimit = 0,
-                    bool ackWantsAck = false);
+                    bool ackWantsAck = false, const meshtastic_MeshPacket *relaySource = nullptr);
 
   private:
     /**
@@ -174,6 +206,22 @@ class Router : protected concurrency::OSThread, protected PacketHistory
      * the drain (and without touching handleDepth) - keeping the stack flat.
      */
     void dispatchReceived(meshtastic_MeshPacket *p, RxSource src);
+
+    /**
+     * Publish a PKI DM between two other nodes to MQTT. Opaque to us, it never reaches the publish in
+     * dispatchReceived(). Marks p pki_encrypted so MQTT files it under the PKI topic.
+     */
+    void perhapsUplinkOpaquePki(meshtastic_MeshPacket *p);
+
+    /// (from, id) of recent opaque PKI uplinks, so the copy heard from each relay is published once.
+    /// Separate from PacketHistory: opaque frames must not touch routing state.
+    struct OpaqueUplink {
+        NodeNum from;
+        PacketId id;
+    };
+    static constexpr uint8_t opaqueUplinkCapacity = 8;
+    OpaqueUplink opaqueUplinkSeen[opaqueUplinkCapacity] = {};
+    uint8_t opaqueUplinkNext = 0;
 
     /**
      * Route a packet addressed to us (or a local broadcast we loop back) into handleReceived().
@@ -247,6 +295,8 @@ RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p);
 #ifdef PIO_UNIT_TESTING
 uint32_t routingAuthEvaluationCount();
 void resetRoutingAuthEvaluationCount();
+/** Refill the admin-key fallback budget and re-stamp it against the clock in use right now. */
+void resetAdminKeyFallbackBudget();
 #endif
 
 /** Return 0 for success or a Routing_Error code for failure
