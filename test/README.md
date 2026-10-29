@@ -506,6 +506,7 @@ do not infer completeness from the row count.
 | `test_position_precision`    | Position precision helpers    |
 | `test_radio`                 | Radio interface               |
 | `test_serial`                | Serial communication          |
+| `test_tracker_poll`          | TrailMesh7 tracker polling by room membership |
 | `test_module_config`         | AdminModule module config     |
 | `test_tak_config`            | TAK (ATAK) team/role values   |
 | `test_traffic_management`    | Traffic management            |

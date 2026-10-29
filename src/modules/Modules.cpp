@@ -41,6 +41,7 @@
 #endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "modules/PositionModule.h"
+#include "modules/TrackerPollModule.h"
 #endif
 #if !MESHTASTIC_EXCLUDE_REMOTEHARDWARE
 #include "modules/RemoteHardwareModule.h"
@@ -166,6 +167,10 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_GPS
     positionModule = new PositionModule();
+    // TRAILMESH: answers room members polling this tag as a tracker. Created
+    // regardless of role, so a tag can be given its secret over the phone link
+    // before it is turned into a tracker. See TrackerPollPolicy.h.
+    trackerPollModule = new TrackerPollModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_WAYPOINT
     waypointModule = new WaypointModule();
